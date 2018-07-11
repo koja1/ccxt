@@ -16,7 +16,6 @@ class okex (okcoinusd):
             'has': {
                 'CORS': False,
                 'futures': True,
-                'hasFetchTickers': True,
                 'fetchTickers': True,
             },
             'urls': {
@@ -27,18 +26,16 @@ class okex (okcoinusd):
                     'private': 'https://www.okex.com/api',
                 },
                 'www': 'https://www.okex.com',
-                'doc': 'https://www.okex.com/rest_getStarted.html',
+                'doc': 'https://github.com/okcoin-okex/API-docs-OKEx.com',
                 'fees': 'https://www.okex.com/fees.html',
             },
+            'commonCurrencies': {
+                'CAN': 'Content And AD Network',
+                'FAIR': 'FairGame',
+                'MAG': 'Maggie',
+                'YOYO': 'YOYOW',
+            },
         })
-
-    def common_currency_code(self, currency):
-        currencies = {
-            'FAIR': 'FairGame',
-        }
-        if currency in currencies:
-            return currencies[currency]
-        return currency
 
     def calculate_fee(self, symbol, type, side, amount, price, takerOrMaker='taker', params={}):
         market = self.markets[symbol]

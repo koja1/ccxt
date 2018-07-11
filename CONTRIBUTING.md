@@ -15,14 +15,17 @@ If you want to submit an issue and you want your issue to be resolved quickly, h
   - [Authentication](https://github.com/ccxt-dev/ccxt/wiki/Manual#authentication)
   - [API Keys Setup](https://github.com/ccxt-dev/ccxt/wiki/Manual#api-keys-setup)
 - Read the [Troubleshooting](https://github.com/ccxt-dev/ccxt/wiki/Manual#troubleshooting) section and follow troubleshooting steps.
+- Read the [FAQ](https://github.com/ccxt-dev/ccxt/wiki/Manual) for most frequently asked questions.
 - Read the [API docs](https://github.com/ccxt-dev/ccxt/wiki/Exchange-Markets) for your exchange.
 - Search for similar issues first to avoid duplicates.
 - If your issue is unique, along with a basic description of the failure, the following **IS REQUIRED**:
-  - **set `.verbose = true` property on the exchange instance before calling its methods**
-  - **surround code and output with triple backticks: &#096;&#096;&#096;YOUR\_CODE&#096;&#096;&#096;**
+  - **set `exchange.verbose = true` property on the exchange instance before calling its functions or methods**
+  - **surround code and output with triple backticks: &#096;&#096;&#096;GOOD&#096;&#096;&#096;**
+  - don't confuse the backtick symbol (&#096;) with the quote symbol (\'): '''BAD'''
+  - don't confuse a single backtick with triple backticks: &#096;BAD&#096;
   - paste a complete code snippet you're having difficulties with, avoid one-liners
   - paste the **full verbose output** of the failing method without your keys
-  - don't confuse the backtick symbol (&#096;) with the quote symbol (\'), &#096;&#096;&#096;GOOD&#096;&#096;&#096;, '''BAD'''
+  - the verbose output should include the request and response from the exchange (not just an error callstack)
   - write your language **and version**
   - write ccxt library version
   - which exchange it is
@@ -67,14 +70,14 @@ If your proposal, suggestion or improvement does not relate to the above list of
 4. portable (available in all supported languages)
 5. robust
 6. explicit in what it's doing
-7. doesn't break anything
+7. doesn't break anything (if you change a method, make sure that all other methods calling the edited method are not broken)
 
 The following is a set of rules for contributing to the ccxt library codebase.
 
 ### What You Need To Have
 
 - Node.js 8+
-- Python 3.5+ and Python 2.7+
+- Python 3.5.3+ and Python 2.7+
 - PHP 5.3+ with the following extensions installed and enabled:
   - cURL
   - iconv
@@ -108,7 +111,7 @@ The contents of the repository are structured as follows:
 /php/                      # PHP ccxt module/package folder
 /python/                   # Python ccxt module/package folder for PyPI
 /python/__init__.py        # entry point for the Python version of the ccxt.library
-/python/async/__init__.py  # asynchronous version of the ccxt.library for Python 3.5+ asyncio
+/python/async/__init__.py  # asynchronous version of the ccxt.library for Python 3.5.3+ asyncio
 /python/base/              # base code for the Python version of the ccxt library
 /python/MANIFEST.in        # a PyPI-package file listing extra package files (license, configs, etc...)
 /python/README.rst         # generated reStructuredText for PyPI
@@ -137,7 +140,7 @@ At first, all language-specific versions were developed in parallel, but separat
 
 The module entry points are:
 - `./python/__init__.py` for the Python pip package
-- `./python/async/__init__.py` for the Python 3.5+ ccxt.async subpackage
+- `./python/async/__init__.py` for the Python 3.5.3+ ccxt.async subpackage
 - `./ccxt.js` for the Node.js npm package
 - `./build/ccxt.browser.js` for the browser bundle
 - `./ccxt.php` for PHP
@@ -217,11 +220,16 @@ If the transpiling process finishes successfully, but generates incorrect Python
 And structurally:
 
 - if you need another base method you will have to implement it in all three languages
+- do not issue more than one HTTP request from a unified method
 - try to reduce syntax to basic one-liner expressions
 - multiple lines are ok, but you should avoid deep nesting with lots of brackets
+- avoid changing the contents of the arguments and params passed by reference into function calls
 - do not use conditional statements that are too complex (heavy if-bracketing)
 - do not use heavy ternary conditionals
 - avoid operators clutter (**don't do this**: `a && b || c ? d + 80 : e ** f`)
+- never use `.toString()` on floats: `Number (0.00000001).toString () === '1e-8'`
+- do not use the `in` operator to check if a value is in a non-associative array (list)
+- don't add custom currency or symbol/pair conversions and formatting, copy from existing code instead
 - keep it simple, don't do more than one statement in one line
 
 **If you want to add (support for) another exchange, or implement a new method for a particular exchange, then the best way to make it a consistent improvement is to learn from example. Take a look at how same things are implemented in other exchanges and try to copy the code flow and style.**

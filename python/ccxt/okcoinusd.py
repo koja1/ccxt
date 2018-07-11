@@ -51,8 +51,8 @@ class okcoinusd (Exchange):
             'api': {
                 'web': {
                     'get': [
-                        'markets/currencies',
-                        'markets/products',
+                        'spot/markets/currencies',
+                        'spot/markets/products',
                     ],
                 },
                 'public': {
@@ -85,6 +85,7 @@ class okcoinusd (Exchange):
                         'cancel_order',
                         'cancel_otc_order',
                         'cancel_withdraw',
+                        'funds_transfer',
                         'future_batch_trade',
                         'future_cancel',
                         'future_devolve',
@@ -109,6 +110,7 @@ class okcoinusd (Exchange):
                         'trade',
                         'trade_history',
                         'trade_otc_order',
+                        'wallet_info',
                         'withdraw',
                         'withdraw_info',
                         'unrepayments_info',
@@ -136,27 +138,50 @@ class okcoinusd (Exchange):
                 },
             },
             'exceptions': {
-                '1009': OrderNotFound,  # for spot markets
+                '1009': OrderNotFound,  # for spot markets, cancelling closed order
+                '1051': OrderNotFound,  # for spot markets, cancelling "just closed" order
+                '1019': OrderNotFound,  # order closed?
                 '20015': OrderNotFound,  # for future markets
                 '1013': InvalidOrder,  # no contract type(PR-1101)
                 '1027': InvalidOrder,  # createLimitBuyOrder(symbol, 0, 0): Incorrect parameter may exceeded limits
-                '1002': InsufficientFunds,  # The transaction amount exceed the balance
+                '1002': InsufficientFunds,  # "The transaction amount exceed the balance"
+                '1050': InvalidOrder,  # returned when trying to cancel an order that was filled or canceled previously
                 '10000': ExchangeError,  # createLimitBuyOrder(symbol, None, None)
                 '10005': AuthenticationError,  # bad apiKey
                 '10008': ExchangeError,  # Illegal URL parameter
             },
+            'options': {
+                'marketBuyPrice': False,
+                'defaultContractType': 'this_week',  # next_week, quarter
+                'warnOnFetchOHLCVLimitArgument': True,
+                'fiats': ['USD', 'CNY'],
+                'futures': {
+                    'BCH': True,
+                    'BTC': True,
+                    'BTG': True,
+                    'EOS': True,
+                    'ETC': True,
+                    'ETH': True,
+                    'LTC': True,
+                    'NEO': True,
+                    'QTUM': True,
+                    'USDT': True,
+                    'XUC': True,
+                },
+            },
         })
 
     def fetch_markets(self):
-        response = self.webGetMarketsProducts()
+        response = self.webGetSpotMarketsProducts()
         markets = response['data']
         result = []
         for i in range(0, len(markets)):
             id = markets[i]['symbol']
-            uppercase = id.upper()
-            baseId, quoteId = uppercase.split('_')
-            base = self.common_currency_code(baseId)
-            quote = self.common_currency_code(quoteId)
+            baseId, quoteId = id.split('_')
+            baseIdUppercase = baseId.upper()
+            quoteIdUppercase = quoteId.upper()
+            base = self.common_currency_code(baseIdUppercase)
+            quote = self.common_currency_code(quoteIdUppercase)
             symbol = base + '/' + quote
             precision = {
                 'amount': markets[i]['maxSizeDigit'],
@@ -165,6 +190,9 @@ class okcoinusd (Exchange):
             lot = math.pow(10, -precision['amount'])
             minAmount = markets[i]['minTradeSize']
             minPrice = math.pow(10, -precision['price'])
+            active = (markets[i]['online'] != 0)
+            baseNumericId = markets[i]['baseCurrency']
+            quoteNumericId = markets[i]['quoteCurrency']
             market = self.extend(self.fees['trading'], {
                 'id': id,
                 'symbol': symbol,
@@ -172,12 +200,14 @@ class okcoinusd (Exchange):
                 'quote': quote,
                 'baseId': baseId,
                 'quoteId': quoteId,
+                'baseNumericId': baseNumericId,
+                'quoteNumericId': quoteNumericId,
                 'info': markets[i],
                 'type': 'spot',
                 'spot': True,
                 'future': False,
                 'lot': lot,
-                'active': True,
+                'active': active,
                 'precision': precision,
                 'limits': {
                     'amount': {
@@ -195,15 +225,20 @@ class okcoinusd (Exchange):
                 },
             })
             result.append(market)
-            if (self.has['futures']) and(market['quote'] == 'USDT'):
-                result.append(self.extend(market, {
-                    'quote': 'USD',
-                    'symbol': market['base'] + '/USD',
-                    'id': market['id'].replace('usdt', 'usd'),
-                    'type': 'future',
-                    'spot': False,
-                    'future': True,
-                }))
+            if (self.has['futures']) and(market['base'] in list(self.options['futures'].keys())):
+                fiats = self.options['fiats']
+                for j in range(0, len(fiats)):
+                    fiat = fiats[j]
+                    lowercaseFiat = fiat.lower()
+                    result.append(self.extend(market, {
+                        'quote': fiat,
+                        'symbol': market['base'] + '/' + fiat,
+                        'id': market['base'].lower() + '_' + lowercaseFiat,
+                        'quoteId': lowercaseFiat,
+                        'type': 'future',
+                        'spot': False,
+                        'future': True,
+                    }))
         return result
 
     def fetch_order_book(self, symbol, limit=None, params={}):
@@ -217,44 +252,41 @@ class okcoinusd (Exchange):
             request['size'] = limit
         if market['future']:
             method += 'Future'
-            request['contract_type'] = 'this_week'  # next_week, quarter
+            request['contract_type'] = self.options['defaultContractType']  # self_week, next_week, quarter
         method += 'Depth'
         orderbook = getattr(self, method)(self.extend(request, params))
-        timestamp = self.milliseconds()
-        return {
-            'bids': orderbook['bids'],
-            'asks': self.sort_by(orderbook['asks'], 0),
-            'timestamp': timestamp,
-            'datetime': self.iso8601(timestamp),
-        }
+        return self.parse_order_book(orderbook)
 
     def parse_ticker(self, ticker, market=None):
         timestamp = ticker['timestamp']
         symbol = None
-        if not market:
+        if market is None:
             if 'symbol' in ticker:
                 marketId = ticker['symbol']
                 if marketId in self.markets_by_id:
                     market = self.markets_by_id[marketId]
         if market:
             symbol = market['symbol']
+        last = self.safe_float(ticker, 'last')
         return {
             'symbol': symbol,
             'timestamp': timestamp,
             'datetime': self.iso8601(timestamp),
-            'high': float(ticker['high']),
-            'low': float(ticker['low']),
-            'bid': float(ticker['buy']),
-            'ask': float(ticker['sell']),
+            'high': self.safe_float(ticker, 'high'),
+            'low': self.safe_float(ticker, 'low'),
+            'bid': self.safe_float(ticker, 'buy'),
+            'bidVolume': None,
+            'ask': self.safe_float(ticker, 'sell'),
+            'askVolume': None,
             'vwap': None,
             'open': None,
-            'close': None,
-            'first': None,
-            'last': float(ticker['last']),
+            'close': last,
+            'last': last,
+            'previousClose': None,
             'change': None,
             'percentage': None,
             'average': None,
-            'baseVolume': float(ticker['vol']),
+            'baseVolume': self.safe_float(ticker, 'vol'),
             'quoteVolume': None,
             'info': ticker,
         }
@@ -268,11 +300,16 @@ class okcoinusd (Exchange):
         }
         if market['future']:
             method += 'Future'
-            request['contract_type'] = 'this_week'  # next_week, quarter
+            request['contract_type'] = self.options['defaultContractType']  # self_week, next_week, quarter
         method += 'Ticker'
         response = getattr(self, method)(self.extend(request, params))
-        timestamp = int(response['date']) * 1000
-        ticker = self.extend(response['ticker'], {'timestamp': timestamp})
+        ticker = self.safe_value(response, 'ticker')
+        if ticker is None:
+            raise ExchangeError(self.id + ' fetchTicker returned an empty response: ' + self.json(response))
+        timestamp = self.safe_integer(response, 'date')
+        if timestamp is not None:
+            timestamp *= 1000
+            ticker = self.extend(ticker, {'timestamp': timestamp})
         return self.parse_ticker(ticker, market)
 
     def parse_trade(self, trade, market=None):
@@ -288,8 +325,8 @@ class okcoinusd (Exchange):
             'order': None,
             'type': None,
             'side': trade['type'],
-            'price': float(trade['price']),
-            'amount': float(trade['amount']),
+            'price': self.safe_float(trade, 'price'),
+            'amount': self.safe_float(trade, 'amount'),
         }
 
     def fetch_trades(self, symbol, since=None, limit=None, params={}):
@@ -301,12 +338,26 @@ class okcoinusd (Exchange):
         }
         if market['future']:
             method += 'Future'
-            request['contract_type'] = 'this_week'  # next_week, quarter
+            request['contract_type'] = self.options['defaultContractType']  # self_week, next_week, quarter
         method += 'Trades'
         response = getattr(self, method)(self.extend(request, params))
         return self.parse_trades(response, market, since, limit)
 
-    def fetch_ohlcv(self, symbol, timeframe='1m', since=None, limit=1440, params={}):
+    def parse_ohlcv(self, ohlcv, market=None, timeframe='1m', since=None, limit=None):
+        numElements = len(ohlcv)
+        volumeIndex = 6 if (numElements > 6) else 5
+        return [
+            ohlcv[0],  # timestamp
+            ohlcv[1],  # Open
+            ohlcv[2],  # High
+            ohlcv[3],  # Low
+            ohlcv[4],  # Close
+            # ohlcv[5],  # quote volume
+            # ohlcv[6],  # base volume
+            ohlcv[volumeIndex],  # okex will return base volume in the 7th element for future markets
+        ]
+
+    def fetch_ohlcv(self, symbol, timeframe='1m', since=None, limit=None, params={}):
         self.load_markets()
         market = self.market(symbol)
         method = 'publicGet'
@@ -316,10 +367,12 @@ class okcoinusd (Exchange):
         }
         if market['future']:
             method += 'Future'
-            request['contract_type'] = 'this_week'  # next_week, quarter
+            request['contract_type'] = self.options['defaultContractType']  # self_week, next_week, quarter
         method += 'Kline'
         if limit is not None:
-            request['size'] = int(limit)
+            if self.options['warnOnFetchOHLCVLimitArgument']:
+                raise ExchangeError(self.id + ' fetchOHLCV counts "limit" candles from current time backwards, therefore the "limit" argument for ' + self.id + ' is disabled. Set ' + self.id + '.options["warnOnFetchOHLCVLimitArgument"] = False to suppress self warning message.')
+            request['size'] = int(limit)  # max is 1440 candles
         if since is not None:
             request['since'] = since
         else:
@@ -332,15 +385,15 @@ class okcoinusd (Exchange):
         response = self.privatePostUserinfo()
         balances = response['info']['funds']
         result = {'info': response}
-        currencies = list(self.currencies.keys())
-        for i in range(0, len(currencies)):
-            currency = currencies[i]
-            lowercase = currency.lower()
+        ids = list(self.currencies_by_id.keys())
+        for i in range(0, len(ids)):
+            id = ids[i]
+            code = self.currencies_by_id[id]['code']
             account = self.account()
-            account['free'] = self.safe_float(balances['free'], lowercase, 0.0)
-            account['used'] = self.safe_float(balances['freezed'], lowercase, 0.0)
+            account['free'] = self.safe_float(balances['free'], id, 0.0)
+            account['used'] = self.safe_float(balances['freezed'], id, 0.0)
             account['total'] = self.sum(account['free'], account['used'])
-            result[currency] = account
+            result[code] = account
         return self.parse_balance(result)
 
     def create_order(self, symbol, type, side, amount, price=None, params={}):
@@ -354,7 +407,7 @@ class okcoinusd (Exchange):
         if market['future']:
             method += 'Future'
             order = self.extend(order, {
-                'contract_type': 'this_week',  # next_week, quarter
+                'contract_type': self.options['defaultContractType'],  # self_week, next_week, quarter
                 'match_price': 0,  # match best counter party price? 0 or 1, ignores price if 1
                 'lever_rate': 10,  # leverage rate value: 10 or 20(10 by default)
                 'price': price,
@@ -367,21 +420,43 @@ class okcoinusd (Exchange):
             else:
                 order['type'] += '_market'
                 if side == 'buy':
-                    order['price'] = self.safe_float(params, 'cost')
-                    if not order['price']:
-                        raise ExchangeError(self.id + ' market buy orders require an additional cost parameter, cost = price * amount')
+                    if self.options['marketBuyPrice']:
+                        if price is None:
+                            # eslint-disable-next-line quotes
+                            raise ExchangeError(self.id + " market buy orders require a price argument(the amount you want to spend or the cost of the order) when self.options['marketBuyPrice'] is True.")
+                        order['price'] = price
+                    else:
+                        order['price'] = self.safe_float(params, 'cost')
+                        if not order['price']:
+                            # eslint-disable-next-line quotes
+                            raise ExchangeError(self.id + " market buy orders require an additional cost parameter, cost = price * amount. If you want to pass the cost of the market order(the amount you want to spend) in the price argument(the default " + self.id + " behaviour), set self.options['marketBuyPrice'] = True. It will effectively suppress self warning exception as well.")
                 else:
                     order['amount'] = amount
         params = self.omit(params, 'cost')
         method += 'Trade'
         response = getattr(self, method)(self.extend(order, params))
+        timestamp = self.milliseconds()
         return {
             'info': response,
             'id': str(response['order_id']),
+            'timestamp': timestamp,
+            'datetime': self.iso8601(timestamp),
+            'lastTradeTimestamp': None,
+            'status': None,
+            'symbol': symbol,
+            'type': type,
+            'side': side,
+            'price': price,
+            'amount': amount,
+            'filled': None,
+            'remaining': None,
+            'cost': None,
+            'trades': None,
+            'fee': None,
         }
 
     def cancel_order(self, id, symbol=None, params={}):
-        if not symbol:
+        if symbol is None:
             raise ExchangeError(self.id + ' cancelOrder() requires a symbol argument')
         self.load_markets()
         market = self.market(symbol)
@@ -392,7 +467,7 @@ class okcoinusd (Exchange):
         method = 'privatePost'
         if market['future']:
             method += 'FutureCancel'
-            request['contract_type'] = 'this_week'  # next_week, quarter
+            request['contract_type'] = self.options['defaultContractType']  # self_week, next_week, quarter
         else:
             method += 'CancelOrder'
         response = getattr(self, method)(self.extend(request, params))
@@ -404,12 +479,25 @@ class okcoinusd (Exchange):
         if status == 0:
             return 'open'
         if status == 1:
-            return 'partial'
+            return 'open'
         if status == 2:
             return 'closed'
+        if status == 3:
+            return 'open'
         if status == 4:
             return 'canceled'
         return status
+
+    def parse_order_side(self, side):
+        if side == 1:
+            return 'buy'  # open long position
+        if side == 2:
+            return 'sell'  # open short position
+        if side == 3:
+            return 'sell'  # liquidate long position
+        if side == 4:
+            return 'buy'  # liquidate short position
+        return side
 
     def parse_order(self, order, market=None):
         side = None
@@ -418,12 +506,19 @@ class okcoinusd (Exchange):
             if (order['type'] == 'buy') or (order['type'] == 'sell'):
                 side = order['type']
                 type = 'limit'
-            else:
-                side = 'buy' if (order['type'] == 'buy_market') else 'sell'
+            elif order['type'] == 'buy_market':
+                side = 'buy'
                 type = 'market'
+            elif order['type'] == 'sell_market':
+                side = 'sell'
+                type = 'market'
+            else:
+                side = self.parse_order_side(order['type'])
+                if ('contract_name' in list(order.keys())) or ('lever_rate' in list(order.keys())):
+                    type = 'margin'
         status = self.parse_order_status(order['status'])
         symbol = None
-        if not market:
+        if market is None:
             if 'symbol' in order:
                 if order['symbol'] in self.markets_by_id:
                     market = self.markets_by_id[order['symbol']]
@@ -433,16 +528,21 @@ class okcoinusd (Exchange):
         createDateField = self.get_create_date_field()
         if createDateField in order:
             timestamp = order[createDateField]
-        amount = order['amount']
-        filled = order['deal_amount']
+        amount = self.safe_float(order, 'amount')
+        filled = self.safe_float(order, 'deal_amount')
         remaining = amount - filled
-        average = order['avg_price']
+        if type == 'market':
+            remaining = 0
+        average = self.safe_float(order, 'avg_price')
+        # https://github.com/ccxt/ccxt/issues/2452
+        average = self.safe_float(order, 'price_avg', average)
         cost = average * filled
         result = {
             'info': order,
             'id': str(order['order_id']),
             'timestamp': timestamp,
             'datetime': self.iso8601(timestamp),
+            'lastTradeTimestamp': None,
             'symbol': symbol,
             'type': type,
             'side': side,
@@ -468,7 +568,7 @@ class okcoinusd (Exchange):
         return 'orders'
 
     def fetch_order(self, id, symbol=None, params={}):
-        if not symbol:
+        if symbol is None:
             raise ExchangeError(self.id + ' fetchOrder requires a symbol parameter')
         self.load_markets()
         market = self.market(symbol)
@@ -482,16 +582,17 @@ class okcoinusd (Exchange):
         }
         if market['future']:
             method += 'Future'
-            request['contract_type'] = 'this_week'  # next_week, quarter
+            request['contract_type'] = self.options['defaultContractType']  # self_week, next_week, quarter
         method += 'OrderInfo'
         response = getattr(self, method)(self.extend(request, params))
         ordersField = self.get_orders_field()
-        if len(response[ordersField]) > 0:
+        numOrders = len(response[ordersField])
+        if numOrders > 0:
             return self.parse_order(response[ordersField][0])
         raise OrderNotFound(self.id + ' order ' + id + ' not found')
 
     def fetch_orders(self, symbol=None, since=None, limit=None, params={}):
-        if not symbol:
+        if symbol is None:
             raise ExchangeError(self.id + ' fetchOrders requires a symbol parameter')
         self.load_markets()
         market = self.market(symbol)
@@ -502,7 +603,7 @@ class okcoinusd (Exchange):
         order_id_in_params = ('order_id' in list(params.keys()))
         if market['future']:
             method += 'FutureOrdersInfo'
-            request['contract_type'] = 'this_week'  # next_week, quarter
+            request['contract_type'] = self.options['defaultContractType']  # self_week, next_week, quarter
             if not order_id_in_params:
                 raise ExchangeError(self.id + ' fetchOrders() requires order_id param for futures market ' + symbol + '(a string of one or more order ids, comma-separated)')
         else:
@@ -518,6 +619,7 @@ class okcoinusd (Exchange):
                 method += 'OrdersInfo'
                 request = self.extend(request, {
                     'type': status,
+                    'order_id': params['order_id'],
                 })
             else:
                 method += 'OrderHistory'
@@ -533,27 +635,30 @@ class okcoinusd (Exchange):
 
     def fetch_open_orders(self, symbol=None, since=None, limit=None, params={}):
         open = 0  # 0 for unfilled orders, 1 for filled orders
-        return self.fetch_orders(symbol, None, None, self.extend({
+        return self.fetch_orders(symbol, since, limit, self.extend({
             'status': open,
         }, params))
 
     def fetch_closed_orders(self, symbol=None, since=None, limit=None, params={}):
         closed = 1  # 0 for unfilled orders, 1 for filled orders
-        orders = self.fetch_orders(symbol, None, None, self.extend({
+        orders = self.fetch_orders(symbol, since, limit, self.extend({
             'status': closed,
         }, params))
-        return self.filter_by(orders, 'status', 'closed')
+        return orders
 
-    def withdraw(self, currency, amount, address, tag=None, params={}):
+    def withdraw(self, code, amount, address, tag=None, params={}):
+        self.check_address(address)
         self.load_markets()
-        lowercase = currency.lower() + '_usd'
+        currency = self.currency(code)
         # if amount < 0.01:
         #     raise ExchangeError(self.id + ' withdraw() requires amount > 0.01')
+        # for some reason they require to supply a pair of currencies for withdrawing one currency
+        currencyId = currency['id'] + '_usd'
         request = {
-            'symbol': lowercase,
+            'symbol': currencyId,
             'withdraw_address': address,
             'withdraw_amount': amount,
-            'target': 'address',  # or okcn, okcom, okex
+            'target': 'address',  # or 'okcn', 'okcom', 'okex'
         }
         query = params
         if 'chargefee' in query:
@@ -582,7 +687,9 @@ class okcoinusd (Exchange):
         url = '/'
         if api != 'web':
             url += self.version + '/'
-        url += path + self.extension
+        url += path
+        if api != 'web':
+            url += self.extension
         if api == 'private':
             self.check_required_credentials()
             query = self.keysort(self.extend({
